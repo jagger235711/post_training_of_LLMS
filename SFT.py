@@ -1,15 +1,32 @@
 # %% 导入所有库
 import torch
 import pandas as pd
-from datasets import load_dataset, Dataset
-from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM, SFTConfig
-
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from trl import SFTTrainer, SFTConfig
 
 # %% 一些辅助函数
+
+
 def generate_responses(
     model, tokenizer, user_message, system_message=None, max_new_tokens=100
 ):
+    """
+
+    接受用户输入，调用模型生成响应
+
+
+    Args:
+        model (_type_): _description_
+        tokenizer (_type_): _description_
+        user_message (_type_): _description_
+        system_message (_type_, optional): _description_. Defaults to None.
+        max_new_tokens (int, optional): _description_. Defaults to 100.
+
+    Returns:
+        _type_: _description_
+    """
+
     messages = []
     if system_message:
         messages.append({"role": "system", "content": system_message})
@@ -46,6 +63,16 @@ def generate_responses(
 def test_model_with_questions(
     model, tokenizer, questions, system_message=None, title="Model Output"
 ):
+    """
+    使用批量输入测试模型
+
+    Args:
+        model (_type_): _description_
+        tokenizer (_type_): _description_
+        questions (_type_): _description_
+        system_message (_type_, optional): _description_. Defaults to None.
+        title (str, optional): _description_. Defaults to "Model Output".
+    """
 
     print(f"\n=== {title} ===")
     for i, question in enumerate(questions, 1):
@@ -58,10 +85,23 @@ def test_model_with_questions(
 def load_model_and_tokenizer(model_name, use_gpu=False):
 
     # 加载基座模型和 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
-    if use_gpu:
+    model_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": (
+            torch.bfloat16 if use_gpu and torch.cuda.is_available() else torch.float32
+        ),
+    }
+    if use_gpu and torch.cuda.is_available():
+        model_kwargs["device_map"] = "auto"
+
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+
+    if use_gpu and not torch.cuda.is_available():
+        use_gpu = False
+
+    if use_gpu and not getattr(model, "hf_device_map", None):
         model.to("cuda")
 
     # 定义默认的 chat tempalte jinjia格式
@@ -81,11 +121,19 @@ def load_model_and_tokenizer(model_name, use_gpu=False):
     return model, tokenizer
 
 
+def format_chat_example(example, tokenizer):
+    return tokenizer.apply_chat_template(
+        example["messages"],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+
 # %%
 # 可视化数据集
 def display_dataset(dataset):
     rows = []
-    for i in range(3):
+    for i in range(min(3, len(dataset))):
         example = dataset[i]
         user_msg = next(
             m["content"] for m in example["messages"] if m["role"] == "user"
@@ -99,15 +147,17 @@ def display_dataset(dataset):
     df = pd.DataFrame(rows)
     pd.set_option("display.max_colwidth", None)  # Avoid truncating long strings
     # display(df)
+    print(df.to_string())
 
 
 # %% 加载 Qwen3-0.6B 的 Base 模型并针对简单问题进行测试
-USE_GPU = True
+USE_GPU = torch.cuda.is_available()
 
 questions = [
     "Give me an 1-sentence introduction of LLM.",
     "Calculate 1+1-1",
     "What's the difference between thread and process?",
+    "爸爸的弟弟我应该如何称呼？",
 ]
 
 # %%
@@ -146,12 +196,16 @@ display_dataset(train_dataset)
 
 # SFTTrainer 设置
 sft_config = SFTConfig(
+    output_dir="./sft_outputs",
     learning_rate=8e-5,
     num_train_epochs=1,
     per_device_train_batch_size=1,  # 每块 GPU 的 batch size。
     gradient_accumulation_steps=8,  # 梯度累积次数。执行梯度下降前的累积步数
     gradient_checkpointing=False,  # 启用梯度检查点机制，以降低训练期间的内存使用量，但会以训练速度变慢为代价。
     logging_steps=2,  # 每两个 step 打印一次 log。
+    max_length=1024,
+    packing=True,  # 是否启用 packing。packing 是一种技术，可以将多个训练样本组合成一个更长的输入序列，以更有效地利用 GPU 内存和提高训练效率。
+    use_cpu=not USE_GPU,
 )
 
 # %%
@@ -160,6 +214,7 @@ sft_trainer = SFTTrainer(
     args=sft_config,
     train_dataset=train_dataset,
     processing_class=tokenizer,  # 训练前使用的数据预处理类
+    formatting_func=lambda example: format_chat_example(example, tokenizer),
 )
 sft_trainer.train()
 
