@@ -85,34 +85,26 @@ def test_model_with_questions(
 def load_model_and_tokenizer(model_name, use_gpu=False):
 
     # 加载基座模型和 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
 
-    model_kwargs = {
-        "trust_remote_code": True,
-        "torch_dtype": (
-            torch.bfloat16 if use_gpu and torch.cuda.is_available() else torch.float32
-        ),
-    }
-    if use_gpu and torch.cuda.is_available():
-        model_kwargs["device_map"] = "auto"
-
-    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
-
-    if use_gpu and not torch.cuda.is_available():
-        use_gpu = False
-
-    if use_gpu and not getattr(model, "hf_device_map", None):
+    if use_gpu:
         model.to("cuda")
 
-    # 定义默认的 chat tempalte jinjia格式
+    # 定义默认的 chat tempalte
     # 如你所见，在使用 LLM 时，模型看到的信息是由 chat message list 转换而来的一个 token sequence，从而继续一个一个生成下一个 token。
-    if not tokenizer.chat_template:
-        tokenizer.chat_template = """{% for message in messages %}
-                {% if message['role'] == 'system' %}System: {{ message['content'] }}\n
-                {% elif message['role'] == 'user' %}User: {{ message['content'] }}\n
-                {% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }} <|endoftext|>
-                {% endif %}
-                {% endfor %}"""
+
+    # - 主要是学习输入数据的格式和知识，一般不用于调整风格
+    # - 通过在模板中添加prompt可以调整风格，会导致问答能力下降。容易答非所问
+    tokenizer.chat_template = """
+        {% for message in messages %}
+        {% if message['role'] == 'system' %}System: {{ message['content'] }}\n
+        {% elif message['role'] == 'user' %}User: {{ message['content'] }}\n
+        {% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }} Meow~ <|endoftext|>
+        {% endif %}
+        {% endfor %}
+
+    """
 
     # 将用于填充的 pad token 设置为用于结尾的 eos token
     if not tokenizer.pad_token:
@@ -161,7 +153,9 @@ questions = [
 ]
 
 # %%
-model, tokenizer = load_model_and_tokenizer("Qwen/Qwen3-0.6B-Base", USE_GPU)
+model, tokenizer = load_model_and_tokenizer(
+    "Qwen/Qwen3-0.6B-Base", USE_GPU
+)  # 用的base模型，没有微调过的
 
 test_model_with_questions(  # 测试模型输出结果
     model, tokenizer, questions, title="Base Model (Before SFT) Output"
@@ -173,7 +167,7 @@ del (
 )  # del 是 Python 中的删除（释放）对象引用的关键字，它本身不会直接销毁对象，但可以用来切断变量名和内存中对象的绑定关系，让对象满足被垃圾回收（GC）的条件。
 
 # %%
-model, tokenizer = load_model_and_tokenizer("Qwen/Qwen3-0.6B", USE_GPU)
+model, tokenizer = load_model_and_tokenizer("Qwen/Qwen3-0.6B", USE_GPU)  # 微调过的
 
 test_model_with_questions(
     model, tokenizer, questions, title="Base Model (After SFT) Output"
@@ -199,11 +193,11 @@ sft_config = SFTConfig(
     output_dir="./sft_outputs",
     learning_rate=8e-5,
     num_train_epochs=1,
-    per_device_train_batch_size=1,  # 每块 GPU 的 batch size。
+    per_device_train_batch_size=2,  # 每块 GPU 的 batch size。
     gradient_accumulation_steps=8,  # 梯度累积次数。执行梯度下降前的累积步数
     gradient_checkpointing=False,  # 启用梯度检查点机制，以降低训练期间的内存使用量，但会以训练速度变慢为代价。
     logging_steps=2,  # 每两个 step 打印一次 log。
-    max_length=1024,
+    # max_length=1024,
     packing=True,  # 是否启用 packing。packing 是一种技术，可以将多个训练样本组合成一个更长的输入序列，以更有效地利用 GPU 内存和提高训练效率。
     use_cpu=not USE_GPU,
 )
@@ -224,3 +218,7 @@ if not USE_GPU:
 test_model_with_questions(
     sft_trainer.model, tokenizer, questions, title="Base Model (After SFT) Output"
 )
+
+# %%
+print(tokenizer.chat_template)
+print(USE_GPU)
